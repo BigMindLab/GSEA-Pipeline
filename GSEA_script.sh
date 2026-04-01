@@ -4,9 +4,8 @@
 # GSEA Parallel Execution Script (Test Version)
 ################################################################################
 # 
-# Author: Daniel Guevara & Daniel Garbozo
-# Date: June 23rd, 2024 (Updated February 2025)
-# Email: dgdiaz011202@gmail.com, dan.garbozo.urp@gmail.com
+# Authors: Daniel Guevara & Daniel Garbozo
+# Email: dgdiaz011202@gmail.com, danielgarbozo4@gmail.com
 #
 # Description:
 #   This script executes multiple GSEA analyses in parallel. It is designed for
@@ -43,18 +42,18 @@
 # IMPORTANT: Customize these paths for your system and data
 
 # Base working directory (all GSEA data should be organized here)
-working_dir="/media/david/bm2/Requena_Chagas_CCC/GSEA_v2/"
+working_dir="/path/to/working/dir/"
 
 # Input files
 expression_data="${working_dir}/GSEA_expression_data.txt"
-phenotype_info="${working_dir}/phenotype_requena_CCC.cls"
+phenotype_info="${working_dir}/phenotype.cls"
 
 # Gene set and annotation directories
 matrix_dir="${working_dir}/Human_Sets"
 chip_annotations="${working_dir}/Human_Annotations"
 
 # Output directory (results will be saved here)
-output_dir="${working_dir}/C3_TFTLEGACY"
+output_dir="${working_dir}/output/"
 
 # Verify that all input files exist
 if [ ! -f "$expression_data" ]; then

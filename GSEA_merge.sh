@@ -6,7 +6,7 @@
 #
 # Author: Daniel Garbozo & Daniel Guevara
 # Date: February 20, 2025
-# Email: dan.garbozo.urp@gmail.com, dgdiaz011202@gmail.com
+# Email: danielgarbozo4@gmail.com, dgdiaz011202@gmail.com
 #
 # Description:
 #   This script merges multiple GSEA result files from different collections and
@@ -70,10 +70,10 @@
 
 # Main directory containing GSEA results organized by collection
 # Each subdirectory should be a collection name (e.g., c1, c2.cgp, c3, c5, etc.)
-main_dir="/media/david/bm2/Platelets_TB/GSEA/Collections"
+main_dir="/path/to/main/dir"
 
 # Directory where merged output files will be saved
-destination_dir="/media/david/bm2/Platelets_TB/GSEA/all_tsv"
+destination_dir="/path/to/output/dir"
 
 # ------------------- #
 # Validation & Setup  #
