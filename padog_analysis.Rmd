@@ -1,0 +1,465 @@
+---
+title: "PADOG Pathway Enrichment Analysis"
+author: "Daniel Garbozo"
+date: "2025-02-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
+```
+
+# PADOG Pathway Enrichment Analysis Workflow
+
+## Overview
+This workflow performs Pathway Analysis by Differential Gene Expression Ranking (PADOG) on count matrix data with multiple gene set collections and pairwise comparisons.
+
+**Method:** PADOG ranks genes by their differential expression and tests whether pathway genes are ranked significantly higher than expected by chance.
+
+**Output:** CSV and RDS files with pathway enrichment results, including FDR-adjusted p-values and multiple comparison results.
+
+**Author:** Daniel Garbozo  
+**Date:** February 20, 2025
+
+---
+
+## Section 1: Required Libraries
+
+Load all required R packages. If any are missing, uncomment the `install.packages()` or `BiocManager::install()` lines.
+
+```{r setup-libraries, message=FALSE, warning=FALSE}
+# Core analysis packages
+library(PADOG)          # Pathway analysis
+library(limma)          # For voom normalization
+
+# Data handling packages
+library(readxl)         # Read Excel files
+library(dplyr)          # Data manipulation
+library(stringr)        # String processing
+
+# Parallel processing
+library(parallel)       # Base parallel tools
+library(doParallel)     # Foreach parallelization
+
+# Installation (uncomment if needed):
+# install.packages(c("readxl", "dplyr", "stringr", "doParallel"))
+# BiocManager::install(c("PADOG", "limma"))
+```
+
+---
+
+## Section 2: Configure Paths (CUSTOMIZE THIS SECTION)
+
+Edit the paths below to match your system and data locations. These are the **only** lines that should need modification.
+
+```{r config-paths}
+# ================================================================
+# CONFIGURATION SECTION: Update these paths for your data
+# ================================================================
+
+# Base directory containing all analysis data
+main_dir <- "/path/to/your/analysis/directory"
+
+# Directory containing GMT files (gene sets from MSigDB or similar)
+# Expected: *.gmt files (except total_genesets.gmt which will be excluded)
+genesets_dir <- paste0(main_dir, "/gene_sets/")
+
+# Output directory where results will be saved
+# Subdirectories will be created for each gene set collection
+output_dir <- paste0(main_dir, "/PADOG_results/")
+
+# Input expression data file (TSV format)
+# Expected: Tab-separated file with genes as rows, samples as columns
+#           First column should contain gene symbols (used as rownames)
+#           Must include a 'symbol' column for gene names
+expression_file <- paste0(main_dir, "/expression_data.tsv")
+
+# Sample metadata file (Excel format)
+# Expected columns: id, group, gp
+# - id: Sample identifiers (must match column names in expression_file)
+# - group: Broad group assignment
+# - gp: Group prefix used in comparisons (e.g., "Ap", "Bp", "An", "Bn")
+metadata_file <- paste0(main_dir, "/sample_metadata.xlsx")
+
+# ================================================================
+# Verify paths exist
+# ================================================================
+
+if (!dir.exists(genesets_dir)) {
+  stop("Gene sets directory not found: ", genesets_dir)
+}
+
+if (!file.exists(expression_file)) {
+  stop("Expression file not found: ", expression_file)
+}
+
+if (!file.exists(metadata_file)) {
+  stop("Metadata file not found: ", metadata_file)
+}
+
+# Create output directory if it doesn't exist
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+cat("Configuration Summary:\n")
+cat("  Gene sets directory: ", genesets_dir, "\n")
+cat("  Expression file: ", expression_file, "\n")
+cat("  Metadata file: ", metadata_file, "\n")
+cat("  Output directory: ", output_dir, "\n\n")
+```
+
+---
+
+## Section 3: Define Comparisons and Load Data
+
+```{r prepare-data}
+# ================================================================
+# DEFINE COMPARISONS
+# ================================================================
+# Format: "GroupA_GroupB" where GroupA and GroupB match values in metadata$gp
+# These will be used to subset samples and create design matrices
+
+comparisons <- c("Bp_Ap", "Bp_An", "Ap_An", "Bp_Bn", "Bn_An")
+cat("Comparisons to analyze:", paste(comparisons, collapse = ", "), "\n\n")
+
+# ================================================================
+# LOAD GENE SET FILES (GMT)
+# ================================================================
+
+# List all GMT files (excluding total_genesets.gmt)
+genesets_files <- list.files(genesets_dir, pattern = "*.gmt", full.names = TRUE)
+genesets_files <- genesets_files[!grepl("total_genesets.gmt", genesets_files)]
+
+if (length(genesets_files) == 0) {
+  stop("No GMT files found in: ", genesets_dir)
+}
+
+cat("Found", length(genesets_files), "gene set collections:\n")
+for (f in genesets_files) {
+  cat("  -", basename(f), "\n")
+}
+cat("\n")
+
+# ================================================================
+# LOAD SAMPLE METADATA
+# ================================================================
+
+metadata <- read_xlsx(metadata_file) %>%
+  select(id, group, gp) %>%
+  rename(Sample = id)
+
+rownames(metadata) <- metadata$Sample
+
+cat("Loaded", nrow(metadata), "samples\n")
+cat("Sample groups found:", unique(metadata$gp), "\n\n")
+
+# ================================================================
+# LOAD EXPRESSION MATRIX
+# ================================================================
+
+# Read expression data (tab-separated, gene symbols as rownames)
+PadMat_full <- read.csv(expression_file, sep = "\t", header = TRUE)
+
+# Remove genes without gene symbols (missing values in 'symbol' column)
+PadMat_full <- PadMat_full[!is.na(PadMat_full$symbol), ]
+rownames(PadMat_full) <- PadMat_full$symbol
+
+cat("Loaded expression matrix:", nrow(PadMat_full), "genes x", 
+    ncol(PadMat_full) - 1, "samples\n\n")
+```
+
+---
+
+## Section 4: Define Helper Functions
+
+```{r helper-functions}
+# ================================================================
+# read_msigdb(): Parse GMT file into gene lists
+# ================================================================
+# Input: path to GMT file
+# Output: List with two components:
+#   $flat: Data frame with columns name, url, genes
+#   $lists: Named list of gene vectors for each pathway
+# ================================================================
+
+read_msigdb <- function(path) {
+  tmp <- sapply(readLines(path), function(x) {
+    gsub(' ', '', strsplit(gsub('///', '\t', x), '\t')[[1]])
+  })
+  
+  col <- vector(mode = 'character', length = length(tmp))
+  out <- list(
+    flat = data.frame(
+      name = col, 
+      url = col, 
+      genes = col, 
+      stringsAsFactors = FALSE
+    ), 
+    lists = list()
+  )
+  
+  for (i in 1:length(tmp)) {
+    out$flat[i, 'name'] <- tmp[[i]][1]
+    out$flat[i, 'url'] <- tmp[[i]][2]
+    out$flat[i, 'genes'] <- paste(tmp[[i]][3:length(tmp[[i]])], collapse = ", ")
+    out$lists[i] <- list(tmp[[i]][3:length(tmp[[i]])])
+  }
+  
+  names(out$lists) <- out$flat$name
+  return(out)
+}
+
+# ================================================================
+# munlist(): Flatten list of lists into indexed data frame
+# ================================================================
+# Helper function for working with nested list structures
+# ================================================================
+
+munlist <- function(x, force.rbind = FALSE, force.cbind = FALSE, force.list = FALSE) {
+  if (!any(c(force.list, force.cbind, force.rbind))) {
+    if (any(sapply(x, function(y) is.null(dim(y))))) {
+      force.list <- TRUE
+    }
+    if (length(unique(sapply(x, function(y) dim(y)[2]))) == 1) {
+      force.rbind <- TRUE
+    }
+    if ((length(unique(sapply(x, function(y) dim(y)[1]))) == 1)) {
+      force.cbind <- TRUE
+    }
+  } else {
+    force.list <- TRUE
+  }
+  
+  if (force.list) {
+    return(cbind(
+      ix = unlist(lapply(1:length(x), function(y) rep(y, length(x[[y]])))),
+      iix = unlist(lapply(1:length(x), function(y) if (length(x[[y]]) > 0) 1:length(x[[y]]) else NULL)),
+      unlist(x)
+    ))
+  } else if (force.rbind) {
+    return(cbind(
+      ix = unlist(lapply(1:length(x), function(y) rep(y, nrow(x[[y]])))),
+      iix = unlist(lapply(1:length(x), function(y) if (nrow(x[[y]]) > 0) 1:nrow(x[[y]]) else NULL)),
+      do.call('rbind', x)
+    ))
+  } else if (force.cbind) {
+    return(t(rbind(
+      ix = unlist(lapply(1:length(x), function(y) rep(y, ncol(x[[y]])))),
+      iix = unlist(lapply(1:length(x), function(y) if (ncol(x[[y]]) > 0) 1:ncol(x[[y]]) else NULL)),
+      do.call('cbind', x)
+    )))
+  }
+}
+```
+
+---
+
+## Section 5: Run PADOG Analysis
+
+This section loops through each gene set collection and each comparison, running PADOG and saving results.
+
+```{r run-padog, message=TRUE, warning=FALSE}
+# ================================================================
+# MAIN ANALYSIS LOOP
+# ================================================================
+
+# Data frame to store all results across collections
+total_padog_analysis <- data.frame()
+
+# Loop through each gene set collection
+for (gs_file in genesets_files) {
+  
+  # Extract collection name from filename
+  # Example: "pathway_collection_v2023.gmt" → "pathway_collection"
+  collection_name <- gs_file %>%
+    basename() %>%
+    str_remove("_gene_sets.gmt")
+  
+  cat("=" %in% collection_name, "\n")
+  cat("Collection:", collection_name, "\n")
+  
+  # Create output subdirectory for this collection
+  collection_output_dir <- file.path(output_dir, collection_name)
+  dir.create(collection_output_dir, showWarnings = FALSE, recursive = TRUE)
+  
+  # Data frame to store results for current collection
+  padog_by_collection <- data.frame()
+  
+  # ================================================================
+  # Loop through each comparison
+  # ================================================================
+  
+  for (comp in comparisons) {
+    
+    cat("  Comparison:", comp, "\n")
+    
+    # Extract disease and control groups from comparison string
+    # "Bp_Ap" → disease="Bp", control="Ap"
+    parts <- strsplit(comp, "_")[[1]]
+    disease <- parts[1]
+    control <- parts[2]
+    
+    # Select samples belonging to either group
+    samples_sel <- metadata$Sample[metadata$gp %in% c(control, disease)]
+    
+    # Order samples: control first, then disease (for design matrix)
+    samples_ordered <- samples_sel[
+      order(factor(metadata$gp[samples_sel], levels = c(control, disease)))
+    ]
+    
+    # Extract submatrix for selected samples
+    PadMat_subset <- as.matrix(PadMat_full[, samples_ordered, drop = FALSE])
+    
+    # Remove genes with no counts
+    PadMat_subset <- PadMat_subset[rowSums(PadMat_subset) > 0, ]
+    
+    # Load gene sets for this collection
+    msigdb <- read_msigdb(path = gs_file)
+    gslist <- msigdb$lists
+    
+    # Create group vector: "c"=control, "d"=disease
+    group_vector <- ifelse(metadata[samples_ordered, "gp"] == control, "c", "d")
+    
+    # Create design matrix for voom normalization
+    design <- model.matrix(~ group_vector)
+    
+    # Voom normalization (transforms count data to log-scale)
+    y <- voom(PadMat_subset, design, plot = FALSE)
+    
+    # Convert group_vector to factor
+    group_vector <- factor(group_vector, levels = c("c", "d"))
+    
+    # ================================================================
+    # Run PADOG
+    # ================================================================
+    # Parameters:
+    #   Nmin: Minimum number of genes in a pathway (default: 3)
+    #   NI: Number of permutations (default: 500)
+    #   ncr: Number of cores for parallel processing
+    
+    padog_analysis <- padog(
+      esetm = y$E,
+      group = group_vector,
+      gslist = gslist,
+      organism = "hsa",
+      verbose = TRUE,
+      Nmin = 3,           # Minimum genes per pathway
+      NI = 500,           # Number of permutations
+      plots = FALSE,
+      dseed = 3,
+      parallel = TRUE,
+      ncr = 2             # Number of cores (adjust based on your system)
+    )
+    
+    # Adjust p-values for multiple testing (FDR)
+    padog_analysis$Adj <- p.adjust(padog_analysis$Ppadog, method = "fdr")
+    
+    # Add metadata columns
+    padog_analysis$Collection <- collection_name
+    padog_analysis$Comparison <- comp
+    
+    # Combine results
+    padog_by_collection <- rbind(padog_by_collection, padog_analysis)
+  }
+  
+  # ================================================================
+  # Save results for this collection
+  # ================================================================
+  
+  output_file <- file.path(
+    collection_output_dir, 
+    paste0(collection_name, ".csv")
+  )
+  write.csv(
+    padog_by_collection, 
+    output_file, 
+    quote = FALSE, 
+    row.names = FALSE
+  )
+  
+  cat("    → Saved:", output_file, "\n\n")
+  
+  # Add to total results
+  total_padog_analysis <- rbind(total_padog_analysis, padog_by_collection)
+}
+
+# ================================================================
+# Save Total Results
+# ================================================================
+
+write.csv(
+  total_padog_analysis,
+  file.path(output_dir, "total_padog_analysis.csv"),
+  quote = FALSE,
+  row.names = FALSE
+)
+
+saveRDS(
+  total_padog_analysis,
+  file.path(output_dir, "total_padog_analysis.rds")
+)
+
+cat("Total results saved:\n")
+cat("  CSV: ", file.path(output_dir, "total_padog_analysis.csv"), "\n")
+cat("  RDS: ", file.path(output_dir, "total_padog_analysis.rds"), "\n")
+```
+
+---
+
+## Section 6: Filter Significant Results
+
+```{r filter-significant}
+# ================================================================
+# Filter pathways with adjusted p-value < 0.25 in Bp_Ap comparison
+# ================================================================
+
+sig_bp_ap_genes <- total_padog_analysis %>%
+  filter(Comparison == "Bp_Ap", Adj < 0.25) %>%
+  pull(Name) %>%
+  unique()
+
+cat("Significant pathways (FDR < 0.25) in Bp_Ap comparison:", 
+    length(sig_bp_ap_genes), "\n\n")
+
+# Create filtered dataset with significance annotations
+sig_sets <- total_padog_analysis %>%
+  filter(Name %in% sig_bp_ap_genes) %>%
+  select(-ID) %>%
+  mutate(significance = ifelse(Adj < 0.25, "sig", "not sig"))
+
+# Save filtered results
+write.csv(
+  sig_sets,
+  file = file.path(output_dir, "PADOG_FDR_0.25_in_Bp_Ap.csv"),
+  row.names = FALSE
+)
+
+saveRDS(
+  sig_sets,
+  file = file.path(output_dir, "PADOG_FDR_0.25_in_Bp_Ap.rds")
+)
+
+cat("Filtered results saved.\n\n")
+
+# Summary statistics
+cat("Summary of significant pathways:\n")
+cat("  Total pathways:", length(unique(sig_sets$GeneSet)), "\n")
+cat("  By direction:\n")
+print(table(sig_sets[sig_sets$Comparison == "Bp_Ap", "Direction"]))
+```
+
+---
+
+## Notes
+
+- **Parallelization:** Adjust `ncr` parameter in PADOG call to match your CPU cores
+- **Thresholds:** FDR cutoff (0.25) can be adjusted based on your stringency requirements
+- **Comparisons:** Ensure comparison identifiers match exactly with values in metadata$gp
+- **Missing values:** Genes without symbols and zero-count genes are automatically removed
+
+---
+
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
