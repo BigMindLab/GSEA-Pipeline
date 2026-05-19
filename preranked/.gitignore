@@ -1,0 +1,10 @@
+# MSigDB gene-set files should be downloaded locally by the user.
+examples/brca/input/gmt/*.gmt
+examples/brca/input/gmt/*.zip
+
+# Raw GSEA HTML/EDB reports can be heavy and noisy.
+examples/brca/raw_gsea/
+
+# Keep directory placeholders.
+!examples/brca/input/gmt/.gitkeep
+!examples/brca/raw_gsea/.gitkeep

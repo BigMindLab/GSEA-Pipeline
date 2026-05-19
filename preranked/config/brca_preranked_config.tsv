@@ -1,0 +1,5 @@
+comparison	rnk_file	collection	gmt_file	output_label
+ERpositive_vs_ERnegative	BRCA_ERpositive_vs_ERnegative.rnk	Hallmark	h.all.*.Hs.symbols.gmt	GSEA_ERpositive_vs_ERnegative_Hallmark
+ERpositive_vs_ERnegative	BRCA_ERpositive_vs_ERnegative.rnk	GO_BP	c5.go.bp.*.Hs.symbols.gmt	GSEA_ERpositive_vs_ERnegative_GO_BP
+Tumor_vs_Normal	BRCA_Tumor_vs_Normal.rnk	Hallmark	h.all.*.Hs.symbols.gmt	GSEA_Tumor_vs_Normal_Hallmark
+Tumor_vs_Normal	BRCA_Tumor_vs_Normal.rnk	GO_BP	c5.go.bp.*.Hs.symbols.gmt	GSEA_Tumor_vs_Normal_GO_BP
